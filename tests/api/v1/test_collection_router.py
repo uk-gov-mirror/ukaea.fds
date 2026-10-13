@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session
 
 from app.auth.security import AuthenticatedUser
-from app.models.activity import ActivityCreate
+from app.models.activity import ActivityCreate, ActivityType
 from app.models.collection import CollectionCreate
 from app.models.dataset import DatasetCreate
 from app.models.device import DeviceCreate
@@ -55,10 +55,16 @@ def _make_dataset(
 
 
 def _make_collection(
-    session: Session, name: str, device: str | None = None, shot_id: str | None = None
+    session: Session,
+    name: str,
+    device: str | None = None,
+    shot_id: str | None = None,
+    activity_id: int | None = None,
 ) -> int:
     col = CollectionService(session).create(
-        CollectionCreate(name=name, device_name=device, shot_id=shot_id),
+        CollectionCreate(
+            name=name, device_name=device, shot_id=shot_id, activity_id=activity_id
+        ),
         user=admin_user,
     )
     assert col.id is not None
@@ -106,6 +112,37 @@ def test_read_global_collections(
     assert "run-b" in names
 
 
+def test_read_all_collections_by_scope(
+    test_client: TestClient, session: Session, admin_user_token: dict
+):
+    """GET /collections lists every kind of Collection unless `scope` picks one."""
+    _make_device(session)
+    _make_shot(session)
+    _make_collection(session, "global-col")
+    _make_collection(session, "device-col", device="DEV")
+    _make_collection(session, "shot-col", device="DEV", shot_id="s1")
+
+    response = test_client.get("/v1/collections", headers=admin_user_token)
+    assert response.status_code == 200
+    assert {c["name"] for c in response.json()} == {
+        "global-col",
+        "device-col",
+        "shot-col",
+    }
+
+    response = test_client.get("/v1/collections?scope=global", headers=admin_user_token)
+    assert response.status_code == 200
+    assert [c["name"] for c in response.json()] == ["global-col"]
+
+    response = test_client.get("/v1/collections?scope=device", headers=admin_user_token)
+    assert response.status_code == 200
+    assert [c["name"] for c in response.json()] == ["device-col"]
+
+    response = test_client.get("/v1/collections?scope=shot", headers=admin_user_token)
+    assert response.status_code == 200
+    assert [c["name"] for c in response.json()] == ["shot-col"]
+
+
 def test_read_global_collection_by_name(
     test_client: TestClient, session: Session, admin_user_token: dict
 ):
@@ -146,7 +183,7 @@ def test_create_device_collection(
 def test_read_device_collections(
     test_client: TestClient, session: Session, admin_user_token: dict
 ):
-    """GET /devices/{device}/collections returns only device-level Collections."""
+    """GET /devices/{device}/collections leaves out global Collections."""
     _make_device(session)
     _make_collection(session, "d-col-1", device="DEV")
     _make_collection(session, "global-col")
@@ -156,6 +193,321 @@ def test_read_device_collections(
     names = [c["name"] for c in response.json()]
     assert "d-col-1" in names
     assert "global-col" not in names
+
+
+def test_read_device_collections_by_scope(
+    test_client: TestClient, session: Session, admin_user_token: dict
+):
+    """GET /devices/{device}/collections includes its shots' Collections."""
+    _make_device(session)
+    _make_shot(session)
+    _make_collection(session, "device-col", device="DEV")
+    _make_collection(session, "shot-col", device="DEV", shot_id="s1")
+
+    response = test_client.get("/v1/devices/DEV/collections", headers=admin_user_token)
+    assert response.status_code == 200
+    assert {c["name"] for c in response.json()} == {"device-col", "shot-col"}
+
+    response = test_client.get(
+        "/v1/devices/DEV/collections?scope=device", headers=admin_user_token
+    )
+    assert response.status_code == 200
+    assert [c["name"] for c in response.json()] == ["device-col"]
+
+    response = test_client.get(
+        "/v1/devices/DEV/collections?scope=shot", headers=admin_user_token
+    )
+    assert response.status_code == 200
+    assert [c["name"] for c in response.json()] == ["shot-col"]
+
+    # Nothing under a device is global.
+    response = test_client.get(
+        "/v1/devices/DEV/collections?scope=global", headers=admin_user_token
+    )
+    assert response.status_code == 422
+
+
+def test_read_collections_by_the_run_they_bundle(
+    test_client: TestClient, session: Session, admin_user_token: dict
+):
+    _make_device(session)
+    _make_shot(session)
+    jintrac = SourceService(session).create(
+        SourceCreate(name="jintrac", kind=SourceKind.SOFTWARE), user=admin_user
+    )
+    efit = SourceService(session).create(
+        SourceCreate(name="efit", kind=SourceKind.SOFTWARE), user=admin_user
+    )
+    simulation = ActivityService(session).create(
+        ActivityCreate(activity_type=ActivityType.SIMULATION, source_id=jintrac.id),
+        user=admin_user,
+    )
+    prediction = ActivityService(session).create(
+        ActivityCreate(activity_type=ActivityType.SIMULATION, source_id=jintrac.id),
+        user=admin_user,
+    )
+    analysis = ActivityService(session).create(
+        ActivityCreate(activity_type=ActivityType.ANALYSIS, source_id=efit.id),
+        user=admin_user,
+    )
+    _make_collection(session, "curated")
+    _make_collection(session, "scenario", device="DEV", activity_id=prediction.id)
+    _make_collection(
+        session, "jintrac-run", device="DEV", shot_id="s1", activity_id=simulation.id
+    )
+    _make_collection(
+        session, "efit-run", device="DEV", shot_id="s1", activity_id=analysis.id
+    )
+
+    response = test_client.get(
+        "/v1/collections?activity_type=simulation", headers=admin_user_token
+    )
+    assert response.status_code == 200
+    assert {c["name"] for c in response.json()} == {"scenario", "jintrac-run"}
+
+    response = test_client.get("/v1/collections?source=efit", headers=admin_user_token)
+    assert response.status_code == 200
+    assert [c["name"] for c in response.json()] == ["efit-run"]
+
+    response = test_client.get(
+        f"/v1/collections?activity_id={simulation.id}", headers=admin_user_token
+    )
+    assert response.status_code == 200
+    assert [c["name"] for c in response.json()] == ["jintrac-run"]
+
+    response = test_client.get(
+        "/v1/devices/DEV/collections?scope=shot&activity_type=simulation",
+        headers=admin_user_token,
+    )
+    assert response.status_code == 200
+    assert [c["name"] for c in response.json()] == ["jintrac-run"]
+
+    response = test_client.get(
+        "/v1/devices/DEV/shots/s1/collections?source=jintrac",
+        headers=admin_user_token,
+    )
+    assert response.status_code == 200
+    assert [c["name"] for c in response.json()] == ["jintrac-run"]
+
+    # A source that ran nothing matches nothing.
+    response = test_client.get(
+        "/v1/collections?source=transp", headers=admin_user_token
+    )
+    assert response.status_code == 200
+    assert response.json() == []
+
+    response = test_client.get(
+        "/v1/collections?activity_type=dream", headers=admin_user_token
+    )
+    assert response.status_code == 422
+
+
+def test_filtering_by_run_leaves_out_collections_the_caller_cannot_read(
+    test_client: TestClient, session: Session, non_admin_user_token: dict
+):
+    DeviceService(session).create(
+        DeviceCreate(name="DEV", type="Tokamak", access_level=AccessLevel.PUBLIC),
+        user=admin_user,
+    )
+    _make_shot(session, "s1")
+    ShotService(session).create(
+        ShotCreate(id="s2", device_name="DEV", access_level=AccessLevel.RESTRICTED),
+        user=admin_user,
+    )
+    run = ActivityService(session).create(
+        ActivityCreate(activity_type=ActivityType.SIMULATION), user=admin_user
+    )
+    _make_collection(
+        session, "open-run", device="DEV", shot_id="s1", activity_id=run.id
+    )
+    _make_collection(
+        session, "restricted-run", device="DEV", shot_id="s2", activity_id=run.id
+    )
+
+    response = test_client.get(
+        "/v1/collections?activity_type=simulation", headers=non_admin_user_token
+    )
+    assert response.status_code == 200
+    assert [c["name"] for c in response.json()] == ["open-run"]
+
+
+def test_collection_property_summary_takes_the_listing_filters(
+    test_client: TestClient, session: Session, admin_user_token: dict
+):
+    _make_device(session)
+    _make_shot(session)
+    simulation = ActivityService(session).create(
+        ActivityCreate(activity_type=ActivityType.SIMULATION), user=admin_user
+    )
+    prediction = ActivityService(session).create(
+        ActivityCreate(activity_type=ActivityType.SIMULATION), user=admin_user
+    )
+    analysis = ActivityService(session).create(
+        ActivityCreate(activity_type=ActivityType.ANALYSIS), user=admin_user
+    )
+    collections = CollectionService(session)
+    collections.create(CollectionCreate(name="curated"), user=admin_user)
+    collections.create(
+        CollectionCreate(
+            name="jintrac-run",
+            device_name="DEV",
+            shot_id="s1",
+            activity_id=simulation.id,
+            scientific_metadata=[
+                ScientificProperty(name="confinement_mode", value="H-mode")
+            ],
+        ),
+        user=admin_user,
+    )
+    collections.create(
+        CollectionCreate(
+            name="scenario",
+            device_name="DEV",
+            activity_id=prediction.id,
+            scientific_metadata=[
+                ScientificProperty(name="confinement_mode", value="L-mode")
+            ],
+        ),
+        user=admin_user,
+    )
+    collections.create(
+        CollectionCreate(
+            name="efit-run",
+            device_name="DEV",
+            shot_id="s1",
+            activity_id=analysis.id,
+            scientific_metadata=[ScientificProperty(name="stage", value="1")],
+        ),
+        user=admin_user,
+    )
+
+    response = test_client.get("/v1/collections/properties", headers=admin_user_token)
+    assert response.status_code == 200
+    summary = response.json()
+    assert summary["total"] == 4
+    assert {p["name"] for p in summary["properties"]} == {"confinement_mode", "stage"}
+
+    response = test_client.get(
+        "/v1/collections/properties?activity_type=simulation", headers=admin_user_token
+    )
+    assert response.status_code == 200
+    summary = response.json()
+    assert summary["total"] == 2
+    (mode,) = summary["properties"]
+    assert mode["name"] == "confinement_mode"
+    assert set(mode["values"]) == {"H-mode", "L-mode"}
+
+    response = test_client.get(
+        "/v1/devices/DEV/collections/properties?scope=shot", headers=admin_user_token
+    )
+    assert response.status_code == 200
+    summary = response.json()
+    assert summary["total"] == 2
+    assert {p["name"] for p in summary["properties"]} == {"confinement_mode", "stage"}
+
+
+def test_collection_property_summary_leaves_out_what_the_caller_cannot_read(
+    test_client: TestClient, session: Session, non_admin_user_token: dict
+):
+    DeviceService(session).create(
+        DeviceCreate(name="DEV", type="Tokamak", access_level=AccessLevel.PUBLIC),
+        user=admin_user,
+    )
+    _make_shot(session, "s1")
+    ShotService(session).create(
+        ShotCreate(id="s2", device_name="DEV", access_level=AccessLevel.RESTRICTED),
+        user=admin_user,
+    )
+    collections = CollectionService(session)
+    # Without a second readable collection, confinement_mode would be on every
+    # collection the caller sees, and a property that cannot divide the scope
+    # is left out of the summary.
+    collections.create(
+        CollectionCreate(name="open-notes", device_name="DEV", shot_id="s1"),
+        user=admin_user,
+    )
+    collections.create(
+        CollectionCreate(
+            name="open-run",
+            device_name="DEV",
+            shot_id="s1",
+            scientific_metadata=[
+                ScientificProperty(name="confinement_mode", value="H-mode")
+            ],
+        ),
+        user=admin_user,
+    )
+    collections.create(
+        CollectionCreate(
+            name="restricted-run",
+            device_name="DEV",
+            shot_id="s2",
+            scientific_metadata=[
+                ScientificProperty(name="confinement_mode", value="L-mode")
+            ],
+        ),
+        user=admin_user,
+    )
+
+    response = test_client.get(
+        "/v1/collections/properties", headers=non_admin_user_token
+    )
+    assert response.status_code == 200
+    summary = response.json()
+    assert summary["total"] == 2
+    (mode,) = summary["properties"]
+    assert mode["values"] == ["H-mode"]
+
+
+def test_collection_property_summary_of_an_unknown_device_is_a_404(
+    test_client: TestClient, admin_user_token: dict
+):
+    response = test_client.get(
+        "/v1/devices/nope/collections/properties", headers=admin_user_token
+    )
+    assert response.status_code == 404
+
+
+def test_collection_read_includes_a_summary_of_its_run(
+    test_client: TestClient, session: Session, admin_user_token: dict
+):
+    _make_device(session)
+    jintrac = SourceService(session).create(
+        SourceCreate(name="jintrac", kind=SourceKind.SOFTWARE), user=admin_user
+    )
+    run = ActivityService(session).create(
+        ActivityCreate(
+            activity_type=ActivityType.SIMULATION,
+            source_id=jintrac.id,
+            source_version="v220922",
+        ),
+        user=admin_user,
+    )
+    bundle = _make_collection(session, "jintrac-run", device="DEV", activity_id=run.id)
+    output = DatasetService(session).create(
+        DatasetCreate(
+            name="core_profiles", level=2, device_name="DEV", activity_id=run.id
+        ),
+        user=admin_user,
+    )
+    assert output.id is not None
+    curated = _make_collection(session, "curated", device="DEV")
+    collections = CollectionService(session)
+    collections.add_dataset(bundle, output.id, admin_user)
+    collections.add_child_collection(curated, bundle, admin_user)
+    summary = {
+        "activity_type": "simulation",
+        "source": "jintrac",
+        "source_version": "v220922",
+    }
+
+    response = test_client.get("/v1/devices/DEV/collections", headers=admin_user_token)
+    assert response.status_code == 200
+    by_name = {c["name"]: c for c in response.json()}
+    assert by_name["jintrac-run"]["activity"] == summary
+    assert by_name["jintrac-run"]["datasets"][0]["activity"] == summary
+    assert "activity" not in by_name["curated"]
+    assert by_name["curated"]["child_collections"][0]["activity"] == summary
 
 
 def test_read_device_collection_by_name(
@@ -630,6 +982,60 @@ def test_collection_read_inlines_only_the_first_page_of_members(
     assert [c["id"] for c in read["child_collections"]] == children[:2]
     assert len(ld["dcat:dataset"]) == 2
     assert len(ld["dcat:catalog"]) == 2
+
+
+def test_listing_caps_inlined_members_per_collection(
+    test_client: TestClient, session: Session, monkeypatch
+):
+    """Each listed collection inlines its own first page, not a share of one."""
+    monkeypatch.setattr(collection_service_module, "INLINE_MEMBERS", 2)
+    parent, datasets, children = _public_collection_with_members(session)
+    service = CollectionService(session)
+    sibling = service.create(
+        CollectionCreate(name="sibling", access_level=AccessLevel.PUBLIC),
+        user=admin_user,
+    )
+    assert sibling.id is not None
+    # Added in reverse id order: the inlined page must still be in id order.
+    for ds in reversed(datasets):
+        service.add_dataset(sibling.id, ds, admin_user)
+
+    listed = test_client.get("/v1/collections?scope=global").json()
+    by_id = {c["id"]: c for c in listed}
+
+    assert [d["id"] for d in by_id[parent]["datasets"]] == datasets[:2]
+    assert [c["id"] for c in by_id[parent]["child_collections"]] == children[:2]
+    # A dataset in both collections is inlined in both.
+    assert [d["id"] for d in by_id[sibling.id]["datasets"]] == datasets[:2]
+    assert "child_collections" not in by_id[sibling.id]
+
+
+def test_listing_records_restricted_members_it_inlines(
+    test_client: TestClient, session: Session, admin_user_token: dict, log_lines
+):
+    parent, _, _ = _public_collection_with_members(session)
+    service = CollectionService(session)
+    restricted = DatasetService(session).create(
+        DatasetCreate(
+            name="thomson",
+            url="s3://bucket/thomson",
+            device_name="DEV",
+            access_level=AccessLevel.RESTRICTED,
+        ),
+        user=admin_user,
+    )
+    assert restricted.id is not None
+    service.add_dataset(parent, restricted.id, admin_user)
+    log_lines()
+
+    response = test_client.get("/v1/collections?scope=global", headers=admin_user_token)
+    assert response.status_code == 200, response.text
+    (line,) = [
+        entry
+        for entry in log_lines()
+        if entry.get("logger") == "fds.audit" and entry["event"] == "request"
+    ]
+    assert line["restricted_listed"] == {"dataset": [restricted.id]}
 
 
 def test_collection_members_listed_only_where_readable(

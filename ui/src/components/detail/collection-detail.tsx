@@ -13,6 +13,7 @@ import { useDeviceLabel } from '@/lib/use-device-label';
 import { Layers, Database, FileCode, ChevronRight, Activity as ActivityIcon } from 'lucide-react';
 import { JsonLdPanel } from '@/components/jsonld-panel';
 import { CollapsibleSection } from '@/components/collapsible-section';
+import { RunBadge } from '@/components/run-label';
 
 function formatMediaType(mediaType?: string): string {
   if (!mediaType) return 'Zarr';
@@ -86,6 +87,8 @@ export default function CollectionDetail({ id }: { id: string }) {
     <div className="container mx-auto px-4 py-8">
       {/* Breadcrumb */}
       <div className="flex items-center text-sm text-muted-foreground mb-6 flex-wrap gap-1">
+        <Link href="/collections" className="hover:text-primary transition-colors">Collections</Link>
+        <ChevronRight className="w-4 h-4" />
         {deviceName && (
           <>
             <Link href={`/devices/${deviceName}`} className="hover:text-primary transition-colors">{deviceLabel}</Link>
@@ -95,9 +98,9 @@ export default function CollectionDetail({ id }: { id: string }) {
         {deviceName && shotId && (
           <>
             <Link href={`/devices/${deviceName}/shots/${shotId}`} className="hover:text-primary transition-colors">Shot #{shotId}</Link>
+            <ChevronRight className="w-4 h-4" />
           </>
         )}
-        <ChevronRight className="w-4 h-4" />
         <span className="text-foreground font-medium">{collectionName}</span>
       </div>
 
@@ -118,6 +121,7 @@ export default function CollectionDetail({ id }: { id: string }) {
             <span className="text-xs px-2.5 py-1 rounded-full border text-foreground bg-muted border-border">
               {collection.effective_access_level || collection.access_level}
             </span>
+            <RunBadge activity={collection.activity} />
             <span className="text-xs text-muted-foreground">dcat:Catalog</span>
           </div>
         </div>

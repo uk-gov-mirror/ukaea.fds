@@ -9,15 +9,10 @@ import { LoadMore } from '@/components/load-more';
 import { CollapsibleSection } from '@/components/collapsible-section';
 import { Collection, Device } from '@/lib/types';
 import { Layers, Database, ChevronRight, Globe, Server } from 'lucide-react';
+import { memberCount } from '@/components/run-card';
+import { RunBadge } from '@/components/run-label';
 
 const PAGE_SIZE = 100;
-// A collection read inlines at most this many of each kind of member.
-const INLINE_MEMBERS = 100;
-
-function memberCount(count: number, noun: string): string {
-  const shown = count >= INLINE_MEMBERS ? `${INLINE_MEMBERS}+` : `${count}`;
-  return `${shown} ${noun}${count === 1 ? '' : 's'}`;
-}
 
 function CollectionCard({ col }: { col: Collection }) {
   return (
@@ -49,6 +44,12 @@ function CollectionCard({ col }: { col: Collection }) {
         <span className="px-2.5 py-0.5 rounded-full border text-foreground bg-muted border-border">
           {col.effective_access_level || col.access_level}
         </span>
+        <RunBadge activity={col.activity} />
+        {col.shot_id && (
+          <span className="px-2.5 py-0.5 rounded-full border text-foreground bg-muted border-border">
+            shot {col.shot_id}
+          </span>
+        )}
         {!!col.datasets?.length && (
           <span className="flex items-center gap-1">
             <Database className="w-3.5 h-3.5" />
@@ -136,7 +137,8 @@ export default function CollectionsPage() {
           Collections group datasets into a single citable unit
           (<code className="text-foreground">dcat:Catalog</code>): the outputs of a run, a curated
           selection, or the contents of a store. Global collections are listed first, then each
-          device&apos;s. A shot&apos;s own collections are listed on the shot.
+          device&apos;s, including those on its shots. Simulation runs can also be browsed under{' '}
+          <Link href="/simulations" className="text-primary hover:underline">Simulations</Link>.
         </p>
       </div>
 
@@ -148,7 +150,7 @@ export default function CollectionsPage() {
             scope="global"
             title="Global"
             icon={<Globe className="w-4 h-4 text-muted-foreground" />}
-            url={`${API_BASE}/collections`}
+            url={`${API_BASE}/collections?scope=global`}
             onLoaded={onLoaded}
           />
           {devices?.map((device) => (

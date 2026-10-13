@@ -5,7 +5,6 @@ from fastapi.responses import JSONResponse
 
 from app.api.deps import (
     DEFAULT_PAGE_SIZE,
-    ActivityServiceDep,
     BaseURLDep,
     CurrentUserDep,
     DatasetServiceDep,
@@ -14,14 +13,13 @@ from app.api.deps import (
     Offset,
     SourceServiceDep,
 )
-from app.models.activity import ActivityRead
+from app.models.activity import ActivityRead, ActivityType
 from app.models.dataset import (
     DatasetCreate,
     DatasetDerivationCreate,
     DatasetDerivationRead,
     DatasetLineageNode,
     DatasetRead,
-    DatasetScope,
     DatasetUpdate,
 )
 from app.models.distribution import (
@@ -29,6 +27,7 @@ from app.models.distribution import (
     DistributionRead,
     DistributionUpdate,
 )
+from app.models.scope import CatalogueScope, DeviceScope
 from app.models.source import SourceRead
 from app.services.exceptions import ResourceNotFoundError
 
@@ -63,6 +62,7 @@ def read_datasets_global(
     *,
     dataset_service: DatasetServiceDep,
     user: CurrentUserDep,
+    scope: CatalogueScope = CatalogueScope.ALL,
     offset: Offset = 0,
     limit: Limit = DEFAULT_PAGE_SIZE,
     include_storage_options: bool = False,
@@ -72,9 +72,16 @@ def read_datasets_global(
     name: str | None = None,
     properties: Annotated[list[str] | None, Query(alias="property")] = None,
     shot_properties: Annotated[list[str] | None, Query(alias="shot_property")] = None,
+    activity_type: ActivityType | None = None,
+    source: str | None = None,
+    activity_id: int | None = None,
 ) -> list[DatasetRead]:
     """
-    Retrieve global datasets.
+    Retrieve every dataset accessible to the current user.
+
+    A dataset is attached to a shot, to a device as a whole, or to neither, in
+    which case it is global. All of them are listed unless `scope` asks for one
+    kind: `global`, `device` or `shot`.
 
     `property` filters on the dataset's own `scientific_metadata`. Use `elm` to
     match any dataset that carries that property, or `elm:type-I` to match a
@@ -83,15 +90,23 @@ def read_datasets_global(
     `shot_property` takes the same forms but applies them to the parent shot, so
     a dataset with no shot never matches it.
 
+    `activity_type`, `source` and `activity_id` filter on the run that generated
+    each dataset: `?activity_id=6` lists what run 6 generated, and
+    `?activity_type=simulation` lists simulated datasets.
+
     To scope to a single device, use `/devices/{device_name}/datasets`.
     """
     datasets = dataset_service.get_multi(
         user=user,
+        scope=scope,
         offset=offset,
         limit=limit,
         name=name,
         properties=properties,
         shot_properties=shot_properties,
+        activity_type=activity_type,
+        source=source,
+        activity_id=activity_id,
     )
     return dataset_service.to_read_models(
         datasets,
@@ -165,6 +180,9 @@ def read_datasets_shot(
     include_calibration: bool = False,
     include_annotations: bool = False,
     properties: Annotated[list[str] | None, Query(alias="property")] = None,
+    activity_type: ActivityType | None = None,
+    source: str | None = None,
+    activity_id: int | None = None,
 ) -> list[DatasetRead]:
     """
     Retrieve all datasets for a specific shot.
@@ -172,6 +190,10 @@ def read_datasets_shot(
     `property` filters on each dataset's own `scientific_metadata`. Use `ufo` to
     match any dataset that carries that property, or `ufo:true` to match a
     particular value. Repeat the parameter to require all of them.
+
+    `activity_type`, `source` and `activity_id` filter on the run that generated
+    each dataset: `?activity_id=6` lists what run 6 generated, and
+    `?activity_type=simulation` lists simulated datasets.
     """
     datasets = dataset_service.get_datasets_for_shot(
         shot_id,
@@ -180,6 +202,9 @@ def read_datasets_shot(
         offset=offset,
         limit=limit,
         properties=properties,
+        activity_type=activity_type,
+        source=source,
+        activity_id=activity_id,
     )
     return dataset_service.to_read_models(
         datasets,
@@ -312,7 +337,7 @@ def read_datasets_device(
     device_name: str,
     dataset_service: DatasetServiceDep,
     user: CurrentUserDep,
-    scope: DatasetScope = DatasetScope.ALL,
+    scope: DeviceScope = DeviceScope.ALL,
     offset: Offset = 0,
     limit: Limit = DEFAULT_PAGE_SIZE,
     include_storage_options: bool = False,
@@ -322,6 +347,9 @@ def read_datasets_device(
     name: str | None = None,
     properties: Annotated[list[str] | None, Query(alias="property")] = None,
     shot_properties: Annotated[list[str] | None, Query(alias="shot_property")] = None,
+    activity_type: ActivityType | None = None,
+    source: str | None = None,
+    activity_id: int | None = None,
 ) -> list[DatasetRead]:
     """
     Retrieve datasets hosted by a device.
@@ -339,6 +367,10 @@ def read_datasets_device(
     which is what spans both levels: `?name=equilibrium&shot_property=elm` finds
     the equilibrium datasets of shots that had ELMs. Device-level datasets have no
     shot, so `shot_property` matches nothing under `scope=device`.
+
+    `activity_type`, `source` and `activity_id` filter on the run that generated
+    each dataset: `?activity_id=6` lists what run 6 generated, and
+    `?activity_type=simulation` lists simulated datasets.
     """
     datasets = dataset_service.get_datasets_for_device(
         device_name,
@@ -349,6 +381,9 @@ def read_datasets_device(
         name=name,
         properties=properties,
         shot_properties=shot_properties,
+        activity_type=activity_type,
+        source=source,
+        activity_id=activity_id,
     )
     return dataset_service.to_read_models(
         datasets,
@@ -609,7 +644,7 @@ def delete_distribution(
 def read_dataset_activity(
     *,
     dataset_id: int,
-    activity_service: ActivityServiceDep,
+    dataset_service: DatasetServiceDep,
     user: CurrentUserDep,
 ) -> ActivityRead:
     """
@@ -617,9 +652,7 @@ def read_dataset_activity(
     including timestamps, parameters, and source version.
     Returns 404 if the dataset has no associated activity.
     """
-    return ActivityRead.model_validate(
-        activity_service.get_for_dataset(dataset_id, user)
-    )
+    return ActivityRead.model_validate(dataset_service.get_activity(dataset_id, user))
 
 
 @router.get(
@@ -629,7 +662,7 @@ def read_dataset_activity(
 def read_dataset_source(
     *,
     dataset_id: int,
-    activity_service: ActivityServiceDep,
+    dataset_service: DatasetServiceDep,
     source_service: SourceServiceDep,
     user: CurrentUserDep,
 ) -> SourceRead:
@@ -637,5 +670,5 @@ def read_dataset_source(
     Retrieve the Source (diagnostic system or code) that produced this dataset.
     Shortcut for dataset → activity → source. Returns 404 if the dataset has no activity.
     """
-    activity = activity_service.get_for_dataset(dataset_id, user)
+    activity = dataset_service.get_activity(dataset_id, user)
     return source_service.to_read_model(activity.source)

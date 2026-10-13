@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import useSWR from 'swr';
-import { Database, Server, Activity, BookOpen } from 'lucide-react';
+import { Database, Server, Activity, BookOpen, Cpu } from 'lucide-react';
 import { fetcher, API_BASE } from '@/lib/api';
 import { Device } from '@/lib/types';
 
@@ -16,7 +16,8 @@ export default function Home() {
           Fusion Data Service
         </h1>
         <p className="text-xl text-muted-foreground max-w-2xl mx-auto">
-          Advanced access to experimental data and metadata for the fusion energy community.
+          Experimental and simulation data, and the metadata to find it, for the fusion energy
+          community.
         </p>
       </div>
 
@@ -27,7 +28,7 @@ export default function Home() {
             <div className="bg-muted p-2 rounded-lg text-foreground">
               <Server className="w-6 h-6" />
             </div>
-            <h2 className="text-2xl font-bold text-foreground">Experimental Devices</h2>
+            <h2 className="text-2xl font-bold text-foreground">Devices</h2>
           </div>
           <Link
             href="/devices"
@@ -58,7 +59,7 @@ export default function Home() {
               <div>
                 <h3 className="text-xl font-semibold text-foreground mb-2">No Devices Available</h3>
                 <p className="text-muted-foreground">
-                  There are no experimental devices registered in the system yet, or you don&apos;t have permission to view them.
+                  There are no devices registered yet, or you don&apos;t have permission to view them.
                 </p>
               </div>
             </div>
@@ -94,7 +95,14 @@ export default function Home() {
       </div>
 
       {/* Other Sections */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8">
+        <Link href="/simulations" className="card group p-8 flex flex-col items-center text-center hover:bg-muted transition-colors">
+          <div className="bg-muted p-4 rounded-full mb-6 group-hover:scale-110 transition-transform">
+            <Cpu className="w-8 h-8 text-foreground" />
+          </div>
+          <h2 className="text-2xl font-bold mb-3">Simulations</h2>
+          <p className="text-muted-foreground">Find simulation runs by code, device or what they simulated, and the data they produced.</p>
+        </Link>
         <Link href="/sources" className="card group p-8 flex flex-col items-center text-center hover:bg-muted transition-colors">
           <div className="bg-muted p-4 rounded-full mb-6 group-hover:scale-110 transition-transform">
             <Activity className="w-8 h-8 text-foreground" />

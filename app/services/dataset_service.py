@@ -16,6 +16,7 @@ from app.auth.permissions import check_device_admin, check_is_admin
 from app.core.config import AzureStorageProvider, S3StorageProvider, config
 from app.core.context import ReadTier
 from app.core.naming import normalise_device_name
+from app.models.activity import Activity, ActivitySummary, ActivityType
 from app.models.dataset import (
     Dataset,
     DatasetCreate,
@@ -23,7 +24,6 @@ from app.models.dataset import (
     DatasetDerivationCreate,
     DatasetLineageNode,
     DatasetRead,
-    DatasetScope,
     DatasetUpdate,
 )
 from app.models.device import Device
@@ -31,8 +31,10 @@ from app.models.distribution import Distribution, DistributionRead
 from app.models.file_access import CredentialRequest, anonymous_storage_options
 from app.models.identity import ANONYMOUS_USER, AuthenticatedUser
 from app.models.policy import AccessLevel
+from app.models.scope import CatalogueScope, DeviceScope
 from app.models.shot import Shot
 from app.models.storage_options import derive_storage_options_type
+from app.services.activity_service import ActivityService
 from app.services.annotation_service import AnnotationService
 from app.services.base_service import BaseService
 from app.services.exceptions import (
@@ -43,7 +45,11 @@ from app.services.exceptions import (
     ResourceNotFoundError,
 )
 from app.services.file_access_service import FileAccessService
-from app.services.filters import property_clauses
+from app.services.filters import (
+    activity_clauses,
+    property_clauses,
+    scope_clauses,
+)
 from app.services.jsonld import map_dataset_to_dcat
 from app.services.reference_service import (
     CALIBRATION,
@@ -101,25 +107,38 @@ class DatasetService(BaseService[Dataset, DatasetCreate, DatasetUpdate]):
         self,
         user: AuthenticatedUser = ANONYMOUS_USER,
         *,
+        scope: CatalogueScope = CatalogueScope.ALL,
         offset: int = 0,
         limit: int = 100,
         name: str | None = None,
         properties: list[str] | None = None,
         shot_properties: list[str] | None = None,
+        activity_type: ActivityType | None = None,
+        source: str | None = None,
+        activity_id: int | None = None,
     ) -> Sequence[Dataset]:
         """
-        Global list of datasets. Filters by access level.
+        Every dataset, whatever its scope. Filters by access level.
+
+        ``scope`` narrows it: ``GLOBAL`` to the datasets attached to no device,
+        ``DEVICE`` to those belonging to a device as a whole, ``SHOT`` to those
+        on a shot.
 
         ``properties`` filters on the dataset's own properties;
         ``shot_properties`` on those of its parent shot. A dataset with no shot
         never matches ``shot_properties``. To scope to one device, use
         ``get_datasets_for_device`` rather than filtering here.
         """
-        statement = select(self.model)
+        statement = select(self.model).where(
+            *scope_clauses(col(Dataset.device_name), col(Dataset.shot_id), scope)
+        )
         if name is not None:
             statement = statement.where(self.model.name == name)
         statement = statement.where(
-            *property_clauses(self.model.scientific_metadata, properties)
+            *property_clauses(self.model.scientific_metadata, properties),
+            *activity_clauses(
+                col(Dataset.activity_id), activity_type, source, activity_id
+            ),
         )
         statement = self._apply_shot_properties(statement, shot_properties, user)
         return read_page(
@@ -166,6 +185,28 @@ class DatasetService(BaseService[Dataset, DatasetCreate, DatasetUpdate]):
     ) -> None:
         """Enforce read access, and record it when the resource is not public."""
         check_read(dataset, self.session, user, tier)
+
+    def get_activity(self, dataset_id: int, user: AuthenticatedUser) -> Activity:
+        """The Activity that produced the dataset, for a caller who may read it.
+
+        The dataset's read check runs here rather than in the router, so a caller
+        cannot reach a restricted dataset's run parameters through this
+        sub-resource. It runs before the "no associated activity" 404, so the
+        response does not reveal whether a dataset the caller cannot read has
+        provenance recorded.
+        """
+        dataset = self.session.get(Dataset, dataset_id)
+        if not dataset:
+            raise ResourceNotFoundError(f"Dataset {dataset_id} not found")
+        self.check_read_access(dataset, user)
+        if not dataset.activity_id:
+            raise ResourceNotFoundError(
+                f"Dataset {dataset_id} has no associated activity"
+            )
+        activity = self.session.get(Activity, dataset.activity_id)
+        if not activity:
+            raise ResourceNotFoundError(f"Activity {dataset.activity_id} not found")
+        return activity
 
     def create(self, obj_in: DatasetCreate, user: AuthenticatedUser) -> Dataset:
         """Create a new dataset. Handles global, device, or shot context."""
@@ -604,12 +645,15 @@ class DatasetService(BaseService[Dataset, DatasetCreate, DatasetUpdate]):
         self,
         device_name: str,
         user: AuthenticatedUser = ANONYMOUS_USER,
-        scope: DatasetScope = DatasetScope.ALL,
+        scope: DeviceScope = DeviceScope.ALL,
         offset: int = 0,
         limit: int = 100,
         name: str | None = None,
         properties: list[str] | None = None,
         shot_properties: list[str] | None = None,
+        activity_type: ActivityType | None = None,
+        source: str | None = None,
+        activity_id: int | None = None,
     ) -> Sequence[Dataset]:
         """
         Get datasets hosted by a device, filtering by access.
@@ -626,16 +670,16 @@ class DatasetService(BaseService[Dataset, DatasetCreate, DatasetUpdate]):
         with ``scope=DEVICE`` matches nothing.
         """
         statement = select(Dataset).where(
-            Dataset.device_name == normalise_device_name(device_name)
+            Dataset.device_name == normalise_device_name(device_name),
+            *scope_clauses(col(Dataset.device_name), col(Dataset.shot_id), scope),
         )
-        if scope is DatasetScope.DEVICE:
-            statement = statement.where(col(Dataset.shot_id).is_(None))
-        elif scope is DatasetScope.SHOT:
-            statement = statement.where(col(Dataset.shot_id).is_not(None))
         if name is not None:
             statement = statement.where(Dataset.name == name)
         statement = statement.where(
-            *property_clauses(Dataset.scientific_metadata, properties)
+            *property_clauses(Dataset.scientific_metadata, properties),
+            *activity_clauses(
+                col(Dataset.activity_id), activity_type, source, activity_id
+            ),
         )
         statement = self._apply_shot_properties(statement, shot_properties, user)
         return read_page(
@@ -655,6 +699,9 @@ class DatasetService(BaseService[Dataset, DatasetCreate, DatasetUpdate]):
         offset: int = 0,
         limit: int = 100,
         properties: list[str] | None = None,
+        activity_type: ActivityType | None = None,
+        source: str | None = None,
+        activity_id: int | None = None,
     ) -> Sequence[Dataset]:
         """
         Get all datasets for a specific shot (scoped by device name).
@@ -665,7 +712,12 @@ class DatasetService(BaseService[Dataset, DatasetCreate, DatasetUpdate]):
                 Dataset.shot_id == shot_id,
                 Dataset.device_name == normalise_device_name(device_name),
             )
-            .where(*property_clauses(Dataset.scientific_metadata, properties))
+            .where(
+                *property_clauses(Dataset.scientific_metadata, properties),
+                *activity_clauses(
+                    col(Dataset.activity_id), activity_type, source, activity_id
+                ),
+            )
             .order_by(col(Dataset.id))
         )
         return read_page(
@@ -696,8 +748,13 @@ class DatasetService(BaseService[Dataset, DatasetCreate, DatasetUpdate]):
         dataset: Dataset,
         distributions: list[Distribution],
         access_level: AccessLevel,
+        run: ActivitySummary | None,
     ) -> DatasetRead:
-        """``dataset`` as a DatasetRead, its default distribution's fields inlined."""
+        """``dataset`` as a DatasetRead, its default distribution's fields inlined.
+
+        ``run`` is passed in rather than read from ``dataset``, whose ``activity``
+        is the ORM relationship: reading it would load each row's run separately.
+        """
         default_dist = next((d for d in distributions if d.default_distribution), None)
         return DatasetRead.model_validate(
             dataset,
@@ -712,6 +769,7 @@ class DatasetService(BaseService[Dataset, DatasetCreate, DatasetUpdate]):
                 ]
                 or None,
                 "effective_access_level": access_level,
+                "activity": run,
             },
         )
 
@@ -897,17 +955,26 @@ class DatasetService(BaseService[Dataset, DatasetCreate, DatasetUpdate]):
     ) -> list[DatasetRead]:
         """
         Converts Dataset ORM objects to DatasetRead DTOs, including the effective
-        access level. The default distribution's fields are inlined, and every
-        distribution is listed. Distributions, policies and storage credentials,
-        and references and annotations when included, are each resolved for all
-        the datasets at once. ``include_geometry`` / ``include_calibration``
-        resolve each dataset's ``geometry_references`` /
+        access level. The default distribution's fields are inlined, every
+        distribution is listed, and each read includes a summary of the run that
+        generated its dataset. Distributions, policies, runs and storage
+        credentials, and references and annotations when included, are each
+        resolved for all the datasets at once. ``include_geometry`` /
+        ``include_calibration`` resolve each dataset's ``geometry_references`` /
         ``calibration_references`` to their applicable versions.
         """
         distributions = self._distributions_of(datasets)
         policies = get_effective_policies(datasets, self.session)
+        runs = ActivityService(self.session).get_summaries(
+            d.activity_id for d in datasets
+        )
         models = [
-            self._read_model(dataset, distributions[dataset.id], policy.access_level)
+            self._read_model(
+                dataset,
+                distributions[dataset.id],
+                policy.access_level,
+                runs.get(dataset.activity_id) if dataset.activity_id else None,
+            )
             for dataset, policy in zip(datasets, policies, strict=True)
         ]
         if include_storage_options and user:

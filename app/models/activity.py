@@ -75,9 +75,9 @@ class ActivityDelegation(SQLModel, table=True):
 
 
 class ActivityBase(SQLModel):
-    source_id: int | None = Field(default=None, foreign_key="source.id")
+    source_id: int | None = Field(default=None, foreign_key="source.id", index=True)
     source_version: str | None = None
-    activity_type: ActivityType | None = None
+    activity_type: ActivityType | None = Field(default=None, index=True)
     parameters: dict[str, Any] | None = Field(default=None, sa_column=Column(JSON))
     started_at: UTCDatetime | None = None
     ended_at: UTCDatetime | None = None
@@ -182,6 +182,18 @@ class ActivityCreate(ActivityBase):
 
 class ActivityRead(ActivityBase):
     id: int
+
+
+class ActivitySummary(SQLModel):
+    """A short summary of the run a record names in its ``activity_id``.
+
+    Dataset and collection reads include it, so a list can say what produced each
+    row without a request per row. The full run is read by ``activity_id``.
+    """
+
+    activity_type: ActivityType | None = None
+    source: str | None = None
+    source_version: str | None = None
 
 
 class ActivityInputRead(SQLModel):

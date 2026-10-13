@@ -1,5 +1,4 @@
 from datetime import date
-from enum import Enum
 from typing import TYPE_CHECKING, Self
 
 from pydantic import model_validator
@@ -30,23 +29,9 @@ from .scientific_metadata import ScientificProperty
 from .storage_options import StorageOptions, StorageOptionsType
 
 if TYPE_CHECKING:
-    from .activity import Activity
+    from .activity import Activity, ActivitySummary
     from .distribution import Distribution, DistributionRead
     from .shot import Shot
-
-
-class DatasetScope(str, Enum):
-    """Which datasets a device listing returns.
-
-    - ALL: every dataset hosted by the device, device-level and shot-level.
-    - DEVICE: only datasets that belong to the device as a whole rather than
-      to any one shot.
-    - SHOT: only datasets attached to one of the device's shots.
-    """
-
-    ALL = "all"
-    DEVICE = "device"
-    SHOT = "shot"
 
 
 class DatasetBase(
@@ -387,6 +372,7 @@ class DatasetRead(DatasetBase, TimestampMixin):
     id: int
     shot_id: str | None = None
     activity_id: int | None = None
+    activity: "ActivitySummary | None" = None
     subject_dataset_id: int | None = None
     origin: str | None = None
     effective_access_level: AccessLevel | None = None

@@ -1,19 +1,20 @@
 from collections.abc import Sequence
 
 import structlog
+from sqlalchemy import ColumnElement
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, col, select
 
 from app.auth.access_control import (
     check_read,
-    get_effective_access_level,
     get_effective_policies,
     validate_policy_fields,
 )
 from app.auth.permissions import check_device_admin, check_is_admin
 from app.core.context import ReadTier
 from app.core.naming import normalise_device_name
-from app.models.activity import Activity
+from app.models.activity import Activity, ActivityType
+from app.models.available_properties import AvailableProperties
 from app.models.collection import (
     Collection,
     CollectionCreate,
@@ -22,10 +23,15 @@ from app.models.collection import (
     CollectionRead,
     CollectionUpdate,
 )
-from app.models.dataset import Dataset
+from app.models.dataset import Dataset, DatasetRead
 from app.models.device import Device
 from app.models.identity import ANONYMOUS_USER, AuthenticatedUser
-from app.models.source import Source
+from app.models.scope import CatalogueScope, DeviceScope
+from app.services.activity_service import ActivityService
+from app.services.available_properties import (
+    DEFAULT_MAX_VALUES,
+    available_properties,
+)
 from app.services.base_service import BaseService
 from app.services.dataset_service import DatasetService
 from app.services.exceptions import (
@@ -35,10 +41,18 @@ from app.services.exceptions import (
     ForbiddenError,
     ResourceNotFoundError,
 )
-from app.services.filters import property_clauses
+from app.services.filters import (
+    activity_clauses,
+    property_clauses,
+    scope_clauses,
+)
 from app.services.jsonld import map_collection_to_dcat
 from app.services.shot_service import ShotService
-from app.services.visibility import read_page
+from app.services.visibility import (
+    read_page,
+    read_pages_by_group,
+    readable_clause,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -100,9 +114,7 @@ class CollectionService(BaseService[Collection, CollectionCreate, CollectionUpda
             check_device_admin(user, obj_in.device_name)
 
         elif obj_in.device_name:
-            stmt = select(Device).where(Device.name == obj_in.device_name)
-            if not self.session.exec(stmt).first():
-                raise DeviceNotFoundError(f"Device '{obj_in.device_name}' not found")
+            self._require_device(obj_in.device_name)
             check_device_admin(user, obj_in.device_name)
 
         else:
@@ -196,26 +208,122 @@ class CollectionService(BaseService[Collection, CollectionCreate, CollectionUpda
 
         return self.delete_unchecked(id)
 
+    def _require_device(self, device_name: str) -> None:
+        name = normalise_device_name(device_name)
+        if not self.session.exec(select(Device).where(Device.name == name)).first():
+            raise DeviceNotFoundError(f"Device '{device_name}' not found")
+
+    def _listing_clauses(
+        self,
+        *,
+        device_name: str | None = None,
+        shot_id: str | None = None,
+        scope: CatalogueScope | DeviceScope = CatalogueScope.ALL,
+        properties: list[str] | None = None,
+        activity_type: ActivityType | None = None,
+        source: str | None = None,
+        activity_id: int | None = None,
+    ) -> list[ColumnElement[bool]]:
+        """The clauses for the collections a listing asks for, before access.
+
+        The listings and the property summaries both use them, so a summary's
+        ``total`` counts the collections the matching listing returns.
+        """
+        clauses = scope_clauses(
+            col(Collection.device_name), col(Collection.shot_id), scope
+        )
+        if device_name is not None:
+            clauses.append(
+                col(Collection.device_name) == normalise_device_name(device_name)
+            )
+        if shot_id is not None:
+            clauses.append(col(Collection.shot_id) == shot_id)
+        return [
+            *clauses,
+            *property_clauses(Collection.scientific_metadata, properties),
+            *activity_clauses(
+                col(Collection.activity_id), activity_type, source, activity_id
+            ),
+        ]
+
+    def _page(
+        self,
+        clauses: list[ColumnElement[bool]],
+        user: AuthenticatedUser,
+        offset: int,
+        limit: int,
+    ) -> Sequence[Collection]:
+        statement = select(Collection).where(*clauses).order_by(col(Collection.id))
+        return read_page(
+            self.session, Collection, statement, user, offset=offset, limit=limit
+        )
+
     def get_multi(
         self,
         user: AuthenticatedUser = ANONYMOUS_USER,
         *,
+        scope: CatalogueScope = CatalogueScope.ALL,
         offset: int = 0,
         limit: int = 100,
         properties: list[str] | None = None,
+        activity_type: ActivityType | None = None,
+        source: str | None = None,
+        activity_id: int | None = None,
     ) -> Sequence[Collection]:
-        """Return the global list of Collections, filtered by access level."""
-        statement = (
-            select(Collection)
-            .where(
-                col(Collection.device_name).is_(None),
-                col(Collection.shot_id).is_(None),
-                *property_clauses(Collection.scientific_metadata, properties),
-            )
-            .order_by(col(Collection.id))
+        """Return every Collection, filtered by access level.
+
+        ``scope`` picks one kind: ``GLOBAL`` for the collections attached to no
+        device, ``DEVICE`` for those attached to a device but not to a shot,
+        ``SHOT`` for those attached to a shot.
+        """
+        clauses = self._listing_clauses(
+            scope=scope,
+            properties=properties,
+            activity_type=activity_type,
+            source=source,
+            activity_id=activity_id,
         )
-        return read_page(
-            self.session, Collection, statement, user, offset=offset, limit=limit
+        return self._page(clauses, user, offset, limit)
+
+    def available_properties(
+        self,
+        user: AuthenticatedUser = ANONYMOUS_USER,
+        *,
+        device_name: str | None = None,
+        scope: CatalogueScope | DeviceScope = CatalogueScope.ALL,
+        properties: list[str] | None = None,
+        activity_type: ActivityType | None = None,
+        source: str | None = None,
+        activity_id: int | None = None,
+        max_values: int = DEFAULT_MAX_VALUES,
+    ) -> AvailableProperties:
+        """The properties the matching collections carry, for building a filter.
+
+        Takes the same filters as the listing, so ``total`` counts the matching
+        collections this caller may read. With ``device_name`` it summarises that
+        device's listing, without it the root listing.
+        """
+        if device_name is not None:
+            self._require_device(device_name)
+        where = self._listing_clauses(
+            device_name=device_name,
+            scope=scope,
+            properties=properties,
+            activity_type=activity_type,
+            source=source,
+            activity_id=activity_id,
+        )
+        where.append(
+            readable_clause(
+                self.session, Collection, user, select(Collection).where(*where)
+            )
+        )
+        return available_properties(
+            self.session,
+            Collection,
+            col(Collection.scientific_metadata),
+            where=where,
+            max_values=max_values,
         )
 
     def get_by_name_in_context(
@@ -274,23 +382,29 @@ class CollectionService(BaseService[Collection, CollectionCreate, CollectionUpda
         self,
         device_name: str,
         user: AuthenticatedUser = ANONYMOUS_USER,
+        scope: DeviceScope = DeviceScope.ALL,
         offset: int = 0,
         limit: int = 100,
         properties: list[str] | None = None,
+        activity_type: ActivityType | None = None,
+        source: str | None = None,
+        activity_id: int | None = None,
     ) -> Sequence[Collection]:
-        """Return device-level Collections (not tied to any shot), filtered by access."""
-        statement = (
-            select(Collection)
-            .where(
-                Collection.device_name == normalise_device_name(device_name),
-                col(Collection.shot_id).is_(None),
-                *property_clauses(Collection.scientific_metadata, properties),
-            )
-            .order_by(col(Collection.id))
+        """Return a device's Collections, filtered by access level.
+
+        These are the collections attached to the device as a whole and those
+        attached to its shots. ``scope`` picks one of the two: ``DEVICE`` or
+        ``SHOT``.
+        """
+        clauses = self._listing_clauses(
+            device_name=device_name,
+            scope=scope,
+            properties=properties,
+            activity_type=activity_type,
+            source=source,
+            activity_id=activity_id,
         )
-        return read_page(
-            self.session, Collection, statement, user, offset=offset, limit=limit
-        )
+        return self._page(clauses, user, offset, limit)
 
     def get_collections_for_shot(
         self,
@@ -300,39 +414,20 @@ class CollectionService(BaseService[Collection, CollectionCreate, CollectionUpda
         offset: int = 0,
         limit: int = 100,
         properties: list[str] | None = None,
+        activity_type: ActivityType | None = None,
+        source: str | None = None,
+        activity_id: int | None = None,
     ) -> Sequence[Collection]:
         """Return all Collections scoped to a specific shot, filtered by access."""
-        statement = (
-            select(Collection)
-            .where(
-                Collection.shot_id == shot_id,
-                Collection.device_name == normalise_device_name(device_name),
-                *property_clauses(Collection.scientific_metadata, properties),
-            )
-            .order_by(col(Collection.id))
+        clauses = self._listing_clauses(
+            device_name=device_name,
+            shot_id=shot_id,
+            properties=properties,
+            activity_type=activity_type,
+            source=source,
+            activity_id=activity_id,
         )
-        return read_page(
-            self.session, Collection, statement, user, offset=offset, limit=limit
-        )
-
-    def get_for_source(
-        self,
-        source_name: str,
-        user: AuthenticatedUser = ANONYMOUS_USER,
-        offset: int = 0,
-        limit: int = 100,
-    ) -> Sequence[Collection]:
-        """Return all Collections whose linked Activity was produced by the given Source."""
-        statement = (
-            select(Collection)
-            .join(Activity, Activity.id == Collection.activity_id)  # type: ignore[arg-type]
-            .join(Source, Source.id == Activity.source_id)  # type: ignore[arg-type]
-            .where(Source.name == source_name)
-            .order_by(col(Collection.id))
-        )
-        return read_page(
-            self.session, Collection, statement, user, offset=offset, limit=limit
-        )
+        return self._page(clauses, user, offset, limit)
 
     def add_dataset(
         self, collection_id: int, dataset_id: int, user: AuthenticatedUser
@@ -461,30 +556,8 @@ class CollectionService(BaseService[Collection, CollectionCreate, CollectionUpda
         ``include_storage_options=True`` to include short-lived credentials on
         each dataset.
         """
-        member_datasets = self.get_member_datasets(
-            collection.id, user, limit=INLINE_MEMBERS
-        )
-        dataset_reads = (
-            DatasetService(self.session).to_read_models(
-                member_datasets,
-                include_storage_options=include_storage_options,
-                user=user,
-            )
-            or None
-        )
-        children = self.get_child_collections(collection.id, user, limit=INLINE_MEMBERS)
-        child_reads = self.to_summary_read_models(children) or None
-
-        return CollectionRead.model_validate(
-            collection,
-            update={
-                "effective_access_level": get_effective_access_level(
-                    collection, self.session
-                ),
-                "datasets": dataset_reads,
-                "child_collections": child_reads,
-            },
-        )
+        (read,) = self.to_read_models([collection], include_storage_options, user)
+        return read
 
     def to_read_models(
         self,
@@ -492,12 +565,74 @@ class CollectionService(BaseService[Collection, CollectionCreate, CollectionUpda
         include_storage_options: bool = False,
         user: AuthenticatedUser = ANONYMOUS_USER,
     ) -> list[CollectionRead]:
-        """Batch convert Collection ORM objects to ``CollectionRead`` DTOs."""
-        return [
-            self.to_read_model(
-                c, include_storage_options=include_storage_options, user=user
+        """Batch convert Collection ORM objects to ``CollectionRead`` DTOs.
+
+        Members are read for the whole batch at once, so a listing issues the
+        same statements however many collections it returns.
+        """
+        ids = [c.id for c in collections if c.id is not None]
+        members = read_pages_by_group(
+            self.session,
+            Dataset,
+            select(Dataset)
+            .join(CollectionDataset, col(CollectionDataset.dataset_id) == Dataset.id)
+            .where(col(CollectionDataset.collection_id).in_(ids)),
+            col(CollectionDataset.collection_id),
+            user,
+            limit=INLINE_MEMBERS,
+        )
+        children = read_pages_by_group(
+            self.session,
+            Collection,
+            select(Collection)
+            .join(CollectionMember, col(CollectionMember.child_id) == Collection.id)
+            .where(col(CollectionMember.parent_id).in_(ids)),
+            col(CollectionMember.parent_id),
+            user,
+            limit=INLINE_MEMBERS,
+        )
+
+        # A dataset or child in several of these collections is read once.
+        unique_members = {d.id: d for page in members.values() for d in page}
+        member_reads: dict[int | None, DatasetRead] = {
+            read.id: read
+            for read in DatasetService(self.session).to_read_models(
+                list(unique_members.values()),
+                include_storage_options=include_storage_options,
+                user=user,
             )
-            for c in collections
+        }
+        unique_children = {c.id: c for page in children.values() for c in page}
+        child_reads: dict[int | None, CollectionRead] = {
+            read.id: read
+            for read in self.to_summary_read_models(list(unique_children.values()))
+        }
+        policies = get_effective_policies(collections, self.session)
+        runs = ActivityService(self.session).get_summaries(
+            c.activity_id for c in collections
+        )
+
+        return [
+            CollectionRead.model_validate(
+                collection,
+                update={
+                    "effective_access_level": policy.access_level,
+                    "activity": (
+                        runs.get(collection.activity_id)
+                        if collection.activity_id
+                        else None
+                    ),
+                    "datasets": [
+                        member_reads[d.id] for d in members.get(collection.id, [])
+                    ]
+                    or None,
+                    "child_collections": [
+                        child_reads[c.id] for c in children.get(collection.id, [])
+                    ]
+                    or None,
+                },
+            )
+            for collection, policy in zip(collections, policies, strict=True)
         ]
 
     def _check_write_auth(
@@ -518,11 +653,15 @@ class CollectionService(BaseService[Collection, CollectionCreate, CollectionUpda
     ) -> list[CollectionRead]:
         """``CollectionRead`` DTOs without their members, as listed inside a parent."""
         policies = get_effective_policies(collections, self.session)
+        runs = ActivityService(self.session).get_summaries(
+            c.activity_id for c in collections
+        )
         return [
             CollectionRead.model_validate(
                 c,
                 update={
                     "effective_access_level": policy.access_level,
+                    "activity": runs.get(c.activity_id) if c.activity_id else None,
                     "datasets": None,
                     "child_collections": None,
                 },
@@ -587,6 +726,23 @@ class CollectionService(BaseService[Collection, CollectionCreate, CollectionUpda
             raise ResourceNotFoundError(f"Collection {collection_id} not found")
         self.check_read_access(collection, user)
         return collection
+
+    def get_activity(self, collection_id: int, user: AuthenticatedUser) -> Activity:
+        """The Activity the collection bundles, for a caller who may read it.
+
+        The collection's read check runs before the "no associated activity" 404,
+        so the response does not reveal whether a collection the caller cannot
+        read has a run recorded.
+        """
+        collection = self.get_readable_or_raise(collection_id, user)
+        if not collection.activity_id:
+            raise ResourceNotFoundError(
+                f"Collection {collection_id} has no associated activity"
+            )
+        activity = self.session.get(Activity, collection.activity_id)
+        if not activity:
+            raise ResourceNotFoundError(f"Activity {collection.activity_id} not found")
+        return activity
 
     def to_dcat(
         self, collection: Collection, base_url: str, user: AuthenticatedUser

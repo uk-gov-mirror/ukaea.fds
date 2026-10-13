@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 
 from sqlmodel import Session, col, or_, select
 
@@ -10,6 +10,7 @@ from app.models.activity import (
     ActivityDelegation,
     ActivityInput,
     ActivityInstrument,
+    ActivitySummary,
     ActivityUpdate,
     AgentRole,
 )
@@ -17,8 +18,6 @@ from app.models.dataset import Dataset
 from app.models.identity import AuthenticatedUser
 from app.models.source import Source, SourceKind
 from app.services.base_service import BaseService
-from app.services.collection_service import CollectionService
-from app.services.dataset_service import DatasetService
 from app.services.exceptions import FDSValidationError, ResourceNotFoundError
 from app.services.source_service import SourceService
 from app.services.visibility import read_page
@@ -217,39 +216,31 @@ class ActivityService(BaseService[Activity, ActivityCreate, ActivityUpdate]):
         self._require_activity(id)
         return self.delete_unchecked(id)
 
-    def get_for_dataset(self, dataset_id: int, user: AuthenticatedUser) -> Activity:
-        """Retrieve the Activity that produced the given Dataset.
+    def get_summaries(
+        self, activity_ids: Iterable[int | None]
+    ) -> dict[int, ActivitySummary]:
+        """Summaries of the runs ``activity_ids`` name, by id, read in one query.
 
-        Enforces read access to the dataset here rather than in the router, so a
-        caller cannot reach a restricted dataset's run parameters by going
-        straight to the sub-resource. The check runs before the
-        "no associated activity" 404 so the response does not reveal whether a
-        dataset the caller cannot read has provenance recorded.
+        Callers pass only the ids of records the user may read, so a summary
+        appears only where its record does.
         """
-        dataset = self._require_dataset(dataset_id)
-        DatasetService(self.session).check_read_access(dataset, user)
-        if not dataset.activity_id:
-            raise ResourceNotFoundError(
-                f"Dataset {dataset_id} has no associated activity"
+        ids = {i for i in activity_ids if i is not None}
+        if not ids:
+            return {}
+        rows = self.session.exec(
+            select(Activity, Source.name)
+            .outerjoin(Source, col(Source.id) == col(Activity.source_id))
+            .where(col(Activity.id).in_(ids))
+        ).all()
+        return {
+            activity.id: ActivitySummary(
+                activity_type=activity.activity_type,
+                source=source,
+                source_version=activity.source_version,
             )
-        return self._require_activity(dataset.activity_id)
-
-    def get_for_collection(
-        self, collection_id: int, user: AuthenticatedUser
-    ) -> Activity:
-        """Retrieve the Activity that produced the given Collection.
-
-        The collection counterpart of ``get_for_dataset``, with the read check
-        ahead of the "no associated activity" 404 for the same reason.
-        """
-        collection = CollectionService(self.session).get_readable_or_raise(
-            collection_id, user
-        )
-        if not collection.activity_id:
-            raise ResourceNotFoundError(
-                f"Collection {collection_id} has no associated activity"
-            )
-        return self._require_activity(collection.activity_id)
+            for activity, source in rows
+            if activity.id is not None
+        }
 
     def add_input(
         self, *, activity_id: int, dataset_id: int, user: AuthenticatedUser

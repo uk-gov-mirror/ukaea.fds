@@ -170,7 +170,7 @@ GET /v1/devices/mast/shots/properties
 ```json
 {
   "total": 5300,
-  "annotations": [
+  "properties": [
     {"name": "flat_top", "records": 5300, "distinct": 1, "values": ["true"]},
     {"name": "campaign", "records": 5300, "distinct": 6, "values": ["M5", "M6", "M7", "M8", "M9", "M9a"]},
     {"name": "plasma_current_max", "records": 5300, "distinct": 5267, "unit": "A"}
@@ -203,6 +203,8 @@ GET /v1/devices/mast/shots/properties?property=campaign:M9
 ```
 
 Values a caller is not permitted to read never appear, so two callers can see different properties over the same device.
+
+Collection listings have the same summary. `GET /v1/collections/properties?activity_type=simulation` lists the properties the bundles of simulation runs carry, so a client can offer filters over runs.
 
 ## URL structure
 
