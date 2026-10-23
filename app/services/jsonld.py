@@ -76,6 +76,7 @@ METADATA_CONTEXT = {
     "catalog": {"@id": "dcat:catalog", "@type": "@id"},
     "mediaType": "dcat:mediaType",
     "format": "dct:format",
+    "prov:value": {"@id": "prov:value", "@type": "@json"},
 }
 
 

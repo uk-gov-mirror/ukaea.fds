@@ -116,6 +116,11 @@ def test_jsonld_provenance(
 
     # Verify parameters
     assert prov["prov:value"] == {"run_id": 99}
+    # The parameters are a JSON literal, so an RDF reader keeps them whole.
+    assert document["@context"]["prov:value"] == {
+        "@id": "prov:value",
+        "@type": "@json",
+    }
 
 
 def test_jsonld_no_provenance(
