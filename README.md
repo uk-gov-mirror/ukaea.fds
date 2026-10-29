@@ -82,13 +82,18 @@ If you are developing your own UI, run it on `http://localhost:3001` and it can 
 reference UI against the same stack: the realm accepts logins from either port. A UI running in a
 container reaches FDS and Keycloak by joining the stack's network, `fds-dev_default`.
 
-To work on FDS itself, start the database alone and run FDS from your checkout with reload:
+To work on FDS itself, start the database alone and run FDS from your checkout with reload.
+`.env.example` holds the settings for that, including trust in the key pair generated above, so
+the tokens you mint work here as they do against the stack:
 
 ```bash
+cp .env.example .env               # once
 docker compose up -d postgres
 uv run alembic upgrade head
-FDS_DB_PASSWORD=fds uv run uvicorn app.main:app --reload
+uv run uvicorn app.main:app --reload
 ```
+
+Without those settings FDS trusts no issuer and refuses every token with a 401.
 
 > **Podman on macOS:** if `podman compose up` hangs, `scripts/podman-up.sh` works around it
 > (add `--idp` for Keycloak). Docker users do not need it.
@@ -133,7 +138,7 @@ Key configuration areas:
 - **Authentication**: the issuers whose tokens are accepted and the audience expected (`FDS_TRUSTED_IDPS`, `FDS_OIDC_AUDIENCE`). See [Access Control](https://ukaea.github.io/fds/access-control/).
 - **Storage**: the object stores FDS vends credentials for (`FDS_STORAGE_PROVIDERS`).
 
-`.env.example` lists every setting with its default.
+`.env.example` lists every setting, with the values for running FDS from a checkout.
 
 ## Development
 
