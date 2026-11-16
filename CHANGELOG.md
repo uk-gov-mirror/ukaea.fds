@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.1.2](https://github.com/ukaea/fds/compare/v0.1.1...v0.1.2) (2026-11-16)
+
+
+### Features
+
+* Group repeated annotations and list properties first ([#299](https://github.com/ukaea/fds/issues/299)) ([b33666e](https://github.com/ukaea/fds/commit/b33666e2c4b7b9026d29dfdeccb87385be97b472))
+* Record each request's duration and database time in its log line ([#303](https://github.com/ukaea/fds/issues/303)) ([62566bc](https://github.com/ukaea/fds/commit/62566bc21ae04f987210500432dc918f8a6b2e0d))
+
+
+### Bug Fixes
+
+* Show provenance graph details in a side panel ([#294](https://github.com/ukaea/fds/issues/294)) ([5ae6f55](https://github.com/ukaea/fds/commit/5ae6f55bd50db36af7690ebdd5388e4d8e0fb37e))
+
 ## [0.1.1](https://github.com/ukaea/fds/compare/v0.1.0...v0.1.1) (2026-11-09)
 
 
